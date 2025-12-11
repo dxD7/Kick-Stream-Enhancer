@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kick Unified QoL (Volume Wheel + Auto-1080 + Auto-Theater)
 // @namespace    https://github.com/dxd7
-// @version      1.1
-// @description  FIXED: Replaced unstable Auto-Theater loop with a single, delayed 't' keypress on page load.
+// @version      1.2
+// @description  FIXED: Resolution script now ignores /clips pages.
 // @match        https://kick.com/*
 // @grant        none
 // ==/UserScript==
@@ -19,7 +19,7 @@
 	};
 
 	/* Logger */
-    function log(msg) { console.log(`[KickQoL] ${msg}`); }
+	function log(msg) { console.log(`[KickQoL] ${msg}`); }
 
 	/* Utils */
 	function setCookie(name, value, days) {
@@ -34,7 +34,7 @@
 		e.stopImmediatePropagation();
 	}
 
-    // ROBUST SIMULATED CLICK (Critical for all React buttons)
+	// ROBUST SIMULATED CLICK (Critical for all React buttons)
 	function simulateFullClick(el) {
 		if (!el) return;
 		try {
@@ -69,16 +69,23 @@
 	navObserver.observe(document, { childList: true, subtree: true });
 
 	function onNavigate(url) {
-        log(`Mapsd to: ${url}`);
+		log(`Mapsd to: ${url}`);
 		tryInitPlayer();
-		trySelectQualityLoop();
-        if (isStreamPage(url)) {
-            log("Stream page detected, attempting single 't' press...");
-            singlePressTheater(); // NEW SIMPLE CALL
-        }
+
+		// FIX: Do not attempt to change resolution on clips pages
+		if (!url.includes("/clips")) {
+			trySelectQualityLoop();
+		} else {
+			log("Clips page detected, skipping Auto-Resolution.");
+		}
+
+		if (isStreamPage(url)) {
+			log("Stream page detected, attempting single 't' press...");
+			singlePressTheater(); // NEW SIMPLE CALL
+		}
 	}
 
-    /* helper: decide stream page (not a VOD) */
+	/* helper: decide stream page (not a VOD) */
 	function isStreamPage(url) {
 		const path = url.replace(/^https?:\/\/(?:www\.)?kick\.com\/?/, "");
 		if (!path || path === "") return false;
@@ -164,7 +171,7 @@
 		applySliderCSS();
 	}
 
-    function toggleMute(video, videoDiv) {
+	function toggleMute(video, videoDiv) {
 		if (video.muted) {
 			video.muted = false;
 			setTimeout(() => {
@@ -243,13 +250,13 @@
 	const MAX_QUALITY_ATTEMPTS = 120; // ~6 seconds if interval is 50ms
 
 	function findCogButton() {
-        // Aggressive selector from last attempt
-        const buttons = document.querySelectorAll('#injected-embedded-channel-player-video button');
+		// Aggressive selector from last attempt
+		const buttons = document.querySelectorAll('#injected-embedded-channel-player-video button');
 		for (const btn of buttons) {
-            const label = btn.ariaLabel || '';
-            if (label.toLowerCase().includes('settings') || btn.getAttribute('aria-haspopup') === 'menu') {
-                return btn;
-            }
+			const label = btn.ariaLabel || '';
+			if (label.toLowerCase().includes('settings') || btn.getAttribute('aria-haspopup') === 'menu') {
+				return btn;
+			}
 		}
 		return null;
 	}
@@ -262,7 +269,7 @@
 		for (const pref of CONFIG.QUALITY_PREFERENCES) {
 			const match = list.find(it => it.textContent && it.textContent.trim().includes(pref));
 			if (match) {
-                log(`Selecting Quality: ${pref}`);
+				log(`Selecting Quality: ${pref}`);
 				simulateFullClick(match);
 				return true;
 			}
@@ -270,30 +277,30 @@
 		return false;
 	}
 
-    function trySelectQualityLoop() {
+	function trySelectQualityLoop() {
 		clearQualityLoop();
 		let qualityAttempts = 0;
 		qualityInterval = setInterval(() => {
 			qualityAttempts++;
 			if (qualityAttempts > MAX_QUALITY_ATTEMPTS) {
-                log("Auto-Resolution failed to find settings button after max attempts.");
+				log("Auto-Resolution failed to find settings button after max attempts.");
 				clearQualityLoop();
-                return;
+				return;
 			}
 
-            const cog = findCogButton();
-            if (cog) {
-                simulateFullClick(cog);
+			const cog = findCogButton();
+			if (cog) {
+				simulateFullClick(cog);
 
-                setTimeout(() => {
-                    if (selectQualityIfAvailable()) {
-                        clearQualityLoop();
-                    } else {
-                        // Click again to close the menu for safety
-                        simulateFullClick(cog);
-                    }
-                }, 50);
-            }
+				setTimeout(() => {
+					if (selectQualityIfAvailable()) {
+						clearQualityLoop();
+					} else {
+						// Click again to close the menu for safety
+						simulateFullClick(cog);
+					}
+				}, 50);
+			}
 		}, 250);
 	}
 
@@ -307,38 +314,38 @@
 	/* ------------------ AUTO THEATRE (SINGLE 't' PRESS) ------------------ */
 
 	function singlePressTheater() {
-        const VIDEO_PLAYER_ID = 'video-player';
+		const VIDEO_PLAYER_ID = 'video-player';
 
-        // Use a timeout to ensure the video player and key listener are active
-        setTimeout(() => {
-            const videoElement = document.getElementById(VIDEO_PLAYER_ID);
+		// Use a timeout to ensure the video player and key listener are active
+		setTimeout(() => {
+			const videoElement = document.getElementById(VIDEO_PLAYER_ID);
 
-            // Critical check: Ensure the video player exists before attempting the press
-            if (!videoElement) {
-                log(`Video element (${VIDEO_PLAYER_ID}) not found for 't' press.`);
-                return;
-            }
+			// Critical check: Ensure the video player exists before attempting the press
+			if (!videoElement) {
+				log(`Video element (${VIDEO_PLAYER_ID}) not found for 't' press.`);
+				return;
+			}
 
-            // Check if Theater is already active (by looking for the "Default View" button)
-            const isAlreadyTheater = Array.from(document.querySelectorAll('button')).some(
-                b => (b.ariaLabel && (b.ariaLabel.includes('Default View') || b.ariaLabel.includes('Default Mode')))
-            );
+			// Check if Theater is already active (by looking for the "Default View" button)
+			const isAlreadyTheater = Array.from(document.querySelectorAll('button')).some(
+				b => (b.ariaLabel && (b.ariaLabel.includes('Default View') || b.ariaLabel.includes('Default Mode')))
+			);
 
-            if (isAlreadyTheater) {
-                log("Theater mode already active. Skipping 't' press.");
-                return;
-            }
+			if (isAlreadyTheater) {
+				log("Theater mode already active. Skipping 't' press.");
+				return;
+			}
 
-            // Dispatch a single 't' keypress on the video element
-            const keyEvent = new KeyboardEvent('keydown', {
-                key: 't',
-                code: 'KeyT',
-                bubbles: true,
-                cancelable: true
-            });
-            videoElement.dispatchEvent(keyEvent);
-            log("Dispatched single 't' keypress to toggle Theater Mode.");
-        }, 3000); // 3-second delay to ensure the player is fully initialized
+			// Dispatch a single 't' keypress on the video element
+			const keyEvent = new KeyboardEvent('keydown', {
+				key: 't',
+				code: 'KeyT',
+				bubbles: true,
+				cancelable: true
+			});
+			videoElement.dispatchEvent(keyEvent);
+			log("Dispatched single 't' keypress to toggle Theater Mode.");
+		}, 3000); // 3-second delay to ensure the player is fully initialized
 	}
 
 	/* ------------------ KICK OFF INITIAL RUN ------------------ */
