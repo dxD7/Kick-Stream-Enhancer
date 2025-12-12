@@ -11,7 +11,7 @@ A lightweight 3-in-1 collection of essential stream enhancements for Kick.com. M
 2. **Install the Script:**
    Click the button below to install the script directly.
 
-   [**👉 INSTALL SCRIPT**](https://github.com/dxD7/Kick-Stream-Enhancer/blob/main/Kick-Stream-Enhancer.user.js)
+   [**👉 INSTALL SCRIPT**](https://github.com/dxD7/Kick-Stream-Enhancer/raw/refs/heads/main/Kick-Stream-Enhancer.user.js)
 
 ---
 
