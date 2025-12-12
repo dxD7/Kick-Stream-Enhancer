@@ -5,8 +5,7 @@ A lightweight 3-in-1 collection of essential stream enhancements for Kick.com. M
 ## 📦 Installation
 
 1. **Install a Userscript Manager:**
-   - **Chrome / Edge / Brave:** Install [Tampermonkey](https://www.tampermonkey.net/).
-   - **Firefox:** Install [Violentmonkey](https://violentmonkey.github.io/) or Tampermonkey.
+   - Install [Violentmonkey](https://violentmonkey.github.io/) or Tampermonkey.
 
 2. **Install the Script:**
    Click the button below to install the script directly.
