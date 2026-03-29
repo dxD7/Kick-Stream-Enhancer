@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kick Stream Enhancer (Volume Wheel + Auto-1080 + Auto-Theater)
 // @namespace    https://github.com/dxd7
-// @version      1.2
-// @description  FIXED: Resolution script now ignores /clips pages.
+// @version      1.3
+// @description  FIXED: Resolution script now ignores /clips pages. Added % indicator next to volume slider.
 // @match        https://kick.com/*
 // @grant        none
 // ==/UserScript==
@@ -215,7 +215,43 @@
 			if (sliderValuenow) sliderValuenow.setAttribute("aria-valuenow", Math.round(video.volume * 100));
 			const sliderP = controls.querySelector('.group\\/volume .betterhover\\:group-hover\\/volume\\:flex');
 			if (sliderP) sliderP.setAttribute("playervolume", Math.round(video.volume * 100) + "%");
+
+			// Update the percentage display element if it exists
+			updatePercentageDisplay(Math.round(video.volume * 100));
 		} catch (err) { /* swallow */ }
+	}
+
+	function updatePercentageDisplay(volumePercent) {
+		let percentageDisplay = document.getElementById('kp-volume-percentage');
+		if (!percentageDisplay) {
+			// Create the percentage display element if it doesn't exist
+			percentageDisplay = document.createElement('span');
+			percentageDisplay.id = 'kp-volume-percentage';
+			percentageDisplay.style.cssText = `
+				margin-left: 8px;
+				font-size: 0.875rem;
+				font-weight: 600;
+				color: white;
+				text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+				pointer-events: none;
+			`;
+
+			// Find the volume control container
+			const volumeContainer = document.querySelector('.group\\/volume');
+			if (volumeContainer) {
+				// Insert after the volume slider container
+				const volumeSliderContainer = volumeContainer.querySelector('.betterhover\\:group-hover\\/volume\\:flex');
+				if (volumeSliderContainer) {
+					volumeSliderContainer.parentNode.insertBefore(percentageDisplay, volumeSliderContainer.nextSibling);
+				} else {
+					volumeContainer.appendChild(percentageDisplay);
+				}
+			}
+		}
+
+		if (percentageDisplay) {
+			percentageDisplay.textContent = `${volumePercent}%`;
+		}
 	}
 
 	function applySliderCSS() {
@@ -227,6 +263,18 @@
 	line-height: 1.25rem;
 	margin-left: .5rem;
 	width: 4ch;
+}
+#kp-volume-percentage {
+	margin-left: 8px;
+	font-size: 0.875rem;
+	font-weight: 600;
+	color: white;
+	text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+	pointer-events: none;
+	transition: opacity 0.2s ease;
+}
+.group\\/volume:hover #kp-volume-percentage {
+	opacity: 1;
 }`;
 		if (CONFIG.SLIDER_ALWAYS_VISIBLE) {
 			styles += `
