@@ -1,408 +1,395 @@
 // ==UserScript==
 // @name         Kick Stream Enhancer (Volume Wheel + Auto-1080 + Auto-Theater)
 // @namespace    https://github.com/dxd7
-// @version      1.3
-// @description  FIXED: Resolution script now ignores /clips pages. Added % indicator next to volume slider.
+// @version      1.4
+// @description  FIXED: Resolution script now uses staggered checks and resize listeners to outsmart monitor swaps.
 // @match        https://kick.com/*
 // @grant        none
 // ==/UserScript==
 
 (function () {
-	"use strict";
+    "use strict";
 
-	const CONFIG = {
-		VOLUME_STEP: 5,
-		SHOW_CONTROLS_ON_SCROLL: true,
-		SLIDER_ALWAYS_VISIBLE: true,
-		HIDE_CURSOR_DELAY: 4000,
-		QUALITY_PREFERENCES: ['1080p60', '1080p', '720p60', '720p']
-	};
+    const CONFIG = {
+        VOLUME_STEP: 5,
+        SHOW_CONTROLS_ON_SCROLL: true,
+        SLIDER_ALWAYS_VISIBLE: true,
+        HIDE_CURSOR_DELAY: 4000,
+        QUALITY_PREFERENCES: ['1080p60', '1080p', '720p60', '720p']
+    };
 
-	/* Logger */
-	function log(msg) { console.log(`[KickQoL] ${msg}`); }
+    /* Logger */
+    function log(msg) { console.log(`[KickQoL] ${msg}`); }
 
-	/* Utils */
-	function setCookie(name, value, days) {
-		const date = new Date();
-		date.setTime(date.getTime() + days * 24 * 60 * 60 * 1000);
-		document.cookie = `${name}=${value}; expires=${date.toUTCString()}; path=/`;
-	}
-	function prevent(e) {
-		if (!e) return;
-		e.preventDefault();
-		e.stopPropagation();
-		e.stopImmediatePropagation();
-	}
+    /* Utils */
+    function setCookie(name, value, days) {
+        const date = new Date();
+        date.setTime(date.getTime() + days * 24 * 60 * 60 * 1000);
+        document.cookie = `${name}=${value}; expires=${date.toUTCString()}; path=/`;
+    }
+    function prevent(e) {
+        if (!e) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+    }
 
-	// ROBUST SIMULATED CLICK (Critical for all React buttons)
-	function simulateFullClick(el) {
-		if (!el) return;
-		try {
-			el.focus();
-			['pointerover', 'pointerenter', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(type => {
-				const event = new PointerEvent(type, {
-					bubbles: true,
-					cancelable: true,
-					composed: true,
-					pointerId: 1,
-					pointerType: 'mouse',
-					isPrimary: true,
-				});
-				el.dispatchEvent(event);
-			});
-			el.click();
-		} catch (err) {
-			try { el.click(); } catch (e) { /* ignore */ }
-		}
-	}
+    // ROBUST SIMULATED CLICK
+    function simulateFullClick(el) {
+        if (!el) return;
+        try {
+            el.focus();
+            ['pointerover', 'pointerenter', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(type => {
+                const event = new PointerEvent(type, {
+                    bubbles: true,
+                    cancelable: true,
+                    composed: true,
+                    pointerId: 1,
+                    pointerType: 'mouse',
+                    isPrimary: true,
+                });
+                el.dispatchEvent(event);
+            });
+            el.click();
+        } catch (err) {
+            try { el.click(); } catch (e) { /* ignore */ }
+        }
+    }
 
-	/* ------------------ NAVIGATION ------------------ */
+    /* ------------------ NAVIGATION, FOCUS & SCREEN SWAPS ------------------ */
 
-	let lastUrl = location.href;
-	const navObserver = new MutationObserver(() => {
-		const href = location.href;
-		if (href !== lastUrl) {
-			lastUrl = href;
-			onNavigate(href);
-		}
-	});
-	navObserver.observe(document, { childList: true, subtree: true });
+    let lastUrl = location.href;
+    const navObserver = new MutationObserver(() => {
+        const href = location.href;
+        if (href !== lastUrl) {
+            lastUrl = href;
+            onNavigate(href);
+        }
+    });
+    navObserver.observe(document, { childList: true, subtree: true });
 
-	function onNavigate(url) {
-		log(`Mapsd to: ${url}`);
-		tryInitPlayer();
+    // The Staggered Scheduler: Checks quality multiple times after an event to outlast Kick's internal downgrades
+    let scheduleTimeout;
+    function scheduleQualityChecks() {
+        if (!isStreamPage(location.href) || location.href.includes("/clips")) return;
+        clearTimeout(scheduleTimeout);
+        log("Screen swap/focus detected. Scheduling staggered quality checks...");
 
-		// FIX: Do not attempt to change resolution on clips pages
-		if (!url.includes("/clips")) {
-			trySelectQualityLoop();
-		} else {
-			log("Clips page detected, skipping Auto-Resolution.");
-		}
+        // Fire checks at 2s, 4s, and 6s to catch delayed player resets
+        [2000, 4000, 6000].forEach(delay => {
+            setTimeout(() => {
+                log(`Running scheduled quality check (${delay}ms)`);
+                trySelectQualityLoop();
+            }, delay);
+        });
+    }
 
-		if (isStreamPage(url)) {
-			log("Stream page detected, attempting single 't' press...");
-			singlePressTheater(); // NEW SIMPLE CALL
-		}
-	}
+    // 1. Listen for standard visibility changes (tab backgrounded/foregrounded)
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === 'visible') scheduleQualityChecks();
+    });
 
-	/* helper: decide stream page (not a VOD) */
-	function isStreamPage(url) {
-		const path = url.replace(/^https?:\/\/(?:www\.)?kick\.com\/?/, "");
-		if (!path || path === "") return false;
-		const parts = path.split("/").filter(Boolean);
-		return parts.length === 1;
-	}
+    // 2. Listen for window focus
+    window.addEventListener("focus", scheduleQualityChecks);
 
-	/* ------------------ VOLUME WHEEL ------------------ */
+    // 3. Listen for window resizes (Happens frequently when dragging windows between monitors with different scaling/resolutions)
+    let resizeTimer;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        // Debounce the resize event so we don't spam the scheduler while actively dragging
+        resizeTimer = setTimeout(scheduleQualityChecks, 500);
+    });
 
-	const playerSetupStore = new WeakSet();
-	const bodyObserver = new MutationObserver(() => {
-		tryInitPlayer();
-	});
-	bodyObserver.observe(document.body, { childList: true, subtree: true });
+    function onNavigate(url) {
+        log(`Mapsd to: ${url}`);
+        tryInitPlayer();
 
-	function tryInitPlayer() {
-		const video = document.getElementById("video-player");
-		if (!video) return;
-		const videoDiv = document.querySelector("#injected-embedded-channel-player-video > div");
-		if (!videoDiv) return;
-		if (playerSetupStore.has(videoDiv)) return;
-		playerSetupStore.add(videoDiv);
-		setupVolumeWheel(video, videoDiv);
-	}
+        if (!url.includes("/clips")) {
+            trySelectQualityLoop();
+        } else {
+            log("Clips page detected, skipping Auto-Resolution.");
+        }
 
-	function setupVolumeWheel(video, videoDiv) {
-		if (videoDiv.hasAttribute("kpvolume-init")) return;
-		videoDiv.setAttribute("kpvolume-init", "1");
+        if (isStreamPage(url)) {
+            log("Stream page detected, attempting single 't' press...");
+            singlePressTheater();
+        }
+    }
 
-		videoDiv.addEventListener("wheel", (event) => {
-			prevent(event);
-			if (CONFIG.SHOW_CONTROLS_ON_SCROLL) {
-				const showEvent = new Event('mousemove');
-				videoDiv.dispatchEvent(showEvent);
-			}
-			if (video.muted && videoDiv.getAttribute("kpvolume")) {
-				video.muted = false;
-				setTimeout(() => {
-					const stored = parseFloat(videoDiv.getAttribute("kpvolume"));
-					if (!Number.isNaN(stored)) video.volume = stored;
-					updateSlider(video, videoDiv);
-				}, 50);
-			} else if (event.deltaY < 0) {
-				video.volume = Math.min(1, video.volume + (CONFIG.VOLUME_STEP / 100));
-			} else if (event.deltaY > 0) {
-				video.volume = Math.max(0, video.volume - (CONFIG.VOLUME_STEP / 100));
-			}
-			setTimeout(() => updateSlider(video, videoDiv), 50);
-			setTimeout(() => setCookie("volume", video.volume, 365), 3000);
-		}, { passive: false });
+    function isStreamPage(url) {
+        const path = url.replace(/^https?:\/\/(?:www\.)?kick\.com\/?/, "");
+        if (!path || path === "") return false;
+        const parts = path.split("/").filter(Boolean);
+        return parts.length === 1 && !['video', 'clips', 'search'].includes(parts[0]);
+    }
 
-		let hideCursorTimeout;
-		videoDiv.addEventListener("mousemove", (event) => {
-			setTimeout(() => {
-				bindMuteBtn(video, videoDiv);
-				updateSlider(video, videoDiv);
-			}, 50);
-			setTimeout(() => setCookie("volume", video.volume, 365), 3000);
+    /* ------------------ VOLUME WHEEL ------------------ */
 
-			if (videoDiv.contains(event.target)) {
-				videoDiv.style.cursor = 'default';
-				if (hideCursorTimeout) clearTimeout(hideCursorTimeout);
-				hideCursorTimeout = setTimeout(() => { videoDiv.style.cursor = 'none'; }, CONFIG.HIDE_CURSOR_DELAY);
-			}
-		});
+    const playerSetupStore = new WeakSet();
+    const bodyObserver = new MutationObserver(() => {
+        tryInitPlayer();
+    });
+    bodyObserver.observe(document.body, { childList: true, subtree: true });
 
-		videoDiv.addEventListener("mousedown", (event) => {
-			if (event && event.button === 1) {
-				prevent(event);
-				toggleMute(video, videoDiv);
-			}
-		});
+    function tryInitPlayer() {
+        const video = document.getElementById("video-player");
+        if (!video) return;
+        const videoDiv = document.querySelector("#injected-embedded-channel-player-video > div");
+        if (!videoDiv) return;
+        if (playerSetupStore.has(videoDiv)) return;
+        playerSetupStore.add(videoDiv);
+        setupVolumeWheel(video, videoDiv);
+    }
 
-		document.addEventListener("keydown", (event) => {
-			if ((event.key === 'M' || event.key === 'm') &&
-				event.target.tagName !== 'INPUT' &&
-				event.target.tagName !== 'TEXTAREA' &&
-				event.target.isContentEditable !== true) {
-				prevent(event);
-				toggleMute(video, videoDiv);
-			}
-		});
-		applySliderCSS();
-	}
+    function setupVolumeWheel(video, videoDiv) {
+        if (videoDiv.hasAttribute("kpvolume-init")) return;
+        videoDiv.setAttribute("kpvolume-init", "1");
 
-	function toggleMute(video, videoDiv) {
-		if (video.muted) {
-			video.muted = false;
-			setTimeout(() => {
-				const stored = parseFloat(videoDiv.getAttribute("kpvolume"));
-				if (!Number.isNaN(stored)) video.volume = stored;
-				updateSlider(video, videoDiv);
-			}, 50);
-		} else {
-			videoDiv.setAttribute("kpvolume", video.volume);
-			video.muted = true;
-		}
-	}
+        videoDiv.addEventListener("wheel", (event) => {
+            prevent(event);
+            if (CONFIG.SHOW_CONTROLS_ON_SCROLL) {
+                const showEvent = new Event('mousemove');
+                videoDiv.dispatchEvent(showEvent);
+            }
+            if (video.muted && videoDiv.getAttribute("kpvolume")) {
+                video.muted = false;
+                setTimeout(() => {
+                    const stored = parseFloat(videoDiv.getAttribute("kpvolume"));
+                    if (!Number.isNaN(stored)) video.volume = stored;
+                    updateSlider(video, videoDiv);
+                }, 50);
+            } else if (event.deltaY < 0) {
+                video.volume = Math.min(1, video.volume + (CONFIG.VOLUME_STEP / 100));
+            } else if (event.deltaY > 0) {
+                video.volume = Math.max(0, video.volume - (CONFIG.VOLUME_STEP / 100));
+            }
+            setTimeout(() => updateSlider(video, videoDiv), 50);
+            setTimeout(() => setCookie("volume", video.volume, 365), 3000);
+        }, { passive: false });
 
-	function bindMuteBtn(video, videoDiv) {
-		const muteButton = videoDiv.querySelector('div.z-controls .group\\/volume > button') ||
-			document.querySelector('#injected-embedded-channel-player-video .z-controls .group\\/volume > button');
-		if (!muteButton || muteButton._kpbound) return;
-		muteButton._kpbound = true;
-		muteButton.addEventListener("click", (event) => {
-			prevent(event);
-			toggleMute(video, videoDiv);
-		});
-	}
+        let hideCursorTimeout;
+        videoDiv.addEventListener("mousemove", (event) => {
+            setTimeout(() => {
+                bindMuteBtn(video, videoDiv);
+                updateSlider(video, videoDiv);
+            }, 50);
+            setTimeout(() => setCookie("volume", video.volume, 365), 3000);
 
-	function updateSlider(video, videoDiv) {
-		try {
-			const controls = (videoDiv && videoDiv.querySelector) ? videoDiv.querySelector('div > div.z-controls') : document.querySelector('div.z-controls');
-			if (!controls) return;
-			const sliderFill = controls.querySelector('span[style*="right:"]');
-			if (sliderFill) {
-				const videoVolume = Math.round(video.volume * 100);
-				sliderFill.style.right = `${100 - videoVolume}%`;
-			}
-			const sliderThumb = controls.querySelector('span[style*="transform: var(--radix-slider-thumb-transform)"]');
-			if (sliderThumb) {
-				const videoVolume = Math.round(video.volume * 100);
-				const offset = 8 + (videoVolume / 100) * -16;
-				sliderThumb.style.left = `calc(${videoVolume}% + ${offset}px)`;
-			}
-			const sliderValuenow = controls.querySelector('span[aria-valuenow]');
-			if (sliderValuenow) sliderValuenow.setAttribute("aria-valuenow", Math.round(video.volume * 100));
-			const sliderP = controls.querySelector('.group\\/volume .betterhover\\:group-hover\\/volume\\:flex');
-			if (sliderP) sliderP.setAttribute("playervolume", Math.round(video.volume * 100) + "%");
+            if (videoDiv.contains(event.target)) {
+                videoDiv.style.cursor = 'default';
+                if (hideCursorTimeout) clearTimeout(hideCursorTimeout);
+                hideCursorTimeout = setTimeout(() => { videoDiv.style.cursor = 'none'; }, CONFIG.HIDE_CURSOR_DELAY);
+            }
+        });
 
-			// Update the percentage display element if it exists
-			updatePercentageDisplay(Math.round(video.volume * 100));
-		} catch (err) { /* swallow */ }
-	}
+        videoDiv.addEventListener("mousedown", (event) => {
+            if (event && event.button === 1) {
+                prevent(event);
+                toggleMute(video, videoDiv);
+            }
+        });
 
-	function updatePercentageDisplay(volumePercent) {
-		let percentageDisplay = document.getElementById('kp-volume-percentage');
-		if (!percentageDisplay) {
-			// Create the percentage display element if it doesn't exist
-			percentageDisplay = document.createElement('span');
-			percentageDisplay.id = 'kp-volume-percentage';
-			percentageDisplay.style.cssText = `
-				margin-left: 8px;
-				font-size: 0.875rem;
-				font-weight: 600;
-				color: white;
-				text-shadow: 0 1px 2px rgba(0,0,0,0.5);
-				pointer-events: none;
-			`;
+        document.addEventListener("keydown", (event) => {
+            if ((event.key === 'M' || event.key === 'm') &&
+                event.target.tagName !== 'INPUT' &&
+                event.target.tagName !== 'TEXTAREA' &&
+                event.target.isContentEditable !== true) {
+                prevent(event);
+                toggleMute(video, videoDiv);
+            }
+        });
+        applySliderCSS();
+    }
 
-			// Find the volume control container
-			const volumeContainer = document.querySelector('.group\\/volume');
-			if (volumeContainer) {
-				// Insert after the volume slider container
-				const volumeSliderContainer = volumeContainer.querySelector('.betterhover\\:group-hover\\/volume\\:flex');
-				if (volumeSliderContainer) {
-					volumeSliderContainer.parentNode.insertBefore(percentageDisplay, volumeSliderContainer.nextSibling);
-				} else {
-					volumeContainer.appendChild(percentageDisplay);
-				}
-			}
-		}
+    function toggleMute(video, videoDiv) {
+        if (video.muted) {
+            video.muted = false;
+            setTimeout(() => {
+                const stored = parseFloat(videoDiv.getAttribute("kpvolume"));
+                if (!Number.isNaN(stored)) video.volume = stored;
+                updateSlider(video, videoDiv);
+            }, 50);
+        } else {
+            videoDiv.setAttribute("kpvolume", video.volume);
+            video.muted = true;
+        }
+    }
 
-		if (percentageDisplay) {
-			percentageDisplay.textContent = `${volumePercent}%`;
-		}
-	}
+    function bindMuteBtn(video, videoDiv) {
+        const muteButton = videoDiv.querySelector('div.z-controls .group\\/volume > button') ||
+            document.querySelector('#injected-embedded-channel-player-video .z-controls .group\\/volume > button');
+        if (!muteButton || muteButton._kpbound) return;
+        muteButton._kpbound = true;
+        muteButton.addEventListener("click", (event) => {
+            prevent(event);
+            toggleMute(video, videoDiv);
+        });
+    }
 
-	function applySliderCSS() {
-		let styles = `
+    function updateSlider(video, videoDiv) {
+        try {
+            const controls = (videoDiv && videoDiv.querySelector) ? videoDiv.querySelector('div > div.z-controls') : document.querySelector('div.z-controls');
+            if (!controls) return;
+            const sliderFill = controls.querySelector('span[style*="right:"]');
+            if (sliderFill) {
+                const videoVolume = Math.round(video.volume * 100);
+                sliderFill.style.right = `${100 - videoVolume}%`;
+            }
+            const sliderThumb = controls.querySelector('span[style*="transform: var(--radix-slider-thumb-transform)"]');
+            if (sliderThumb) {
+                const videoVolume = Math.round(video.volume * 100);
+                const offset = 8 + (videoVolume / 100) * -16;
+                sliderThumb.style.left = `calc(${videoVolume}% + ${offset}px)`;
+            }
+            const sliderValuenow = controls.querySelector('span[aria-valuenow]');
+            if (sliderValuenow) sliderValuenow.setAttribute("aria-valuenow", Math.round(video.volume * 100));
+            const sliderP = controls.querySelector('.group\\/volume .betterhover\\:group-hover\\/volume\\:flex');
+            if (sliderP) sliderP.setAttribute("playervolume", Math.round(video.volume * 100) + "%");
+
+            updatePercentageDisplay(Math.round(video.volume * 100));
+        } catch (err) { /* swallow */ }
+    }
+
+    function updatePercentageDisplay(volumePercent) {
+        let percentageDisplay = document.getElementById('kp-volume-percentage');
+        if (!percentageDisplay) {
+            percentageDisplay = document.createElement('span');
+            percentageDisplay.id = 'kp-volume-percentage';
+            percentageDisplay.style.cssText = `margin-left: 8px; font-size: 0.875rem; font-weight: 600; color: white; text-shadow: 0 1px 2px rgba(0,0,0,0.5); pointer-events: none;`;
+            const volumeContainer = document.querySelector('.group\\/volume');
+            if (volumeContainer) {
+                const volumeSliderContainer = volumeContainer.querySelector('.betterhover\\:group-hover\\/volume\\:flex');
+                if (volumeSliderContainer) {
+                    volumeSliderContainer.parentNode.insertBefore(percentageDisplay, volumeSliderContainer.nextSibling);
+                } else {
+                    volumeContainer.appendChild(percentageDisplay);
+                }
+            }
+        }
+        if (percentageDisplay) {
+            percentageDisplay.textContent = `${volumePercent}%`;
+        }
+    }
+
+    function applySliderCSS() {
+        let styles = `
 #injected-embedded-channel-player-video > div > div.z-controls .group\\/volume .betterhover\\:group-hover\\/volume\\:flex::after {
-	content: attr(playervolume);
-	font-weight: 600;
-	font-size: .875rem;
-	line-height: 1.25rem;
-	margin-left: .5rem;
-	width: 4ch;
+	content: attr(playervolume); font-weight: 600; font-size: .875rem; line-height: 1.25rem; margin-left: .5rem; width: 4ch;
 }
-#kp-volume-percentage {
-	margin-left: 8px;
-	font-size: 0.875rem;
-	font-weight: 600;
-	color: white;
-	text-shadow: 0 1px 2px rgba(0,0,0,0.5);
-	pointer-events: none;
-	transition: opacity 0.2s ease;
-}
-.group\\/volume:hover #kp-volume-percentage {
-	opacity: 1;
-}`;
-		if (CONFIG.SLIDER_ALWAYS_VISIBLE) {
-			styles += `
-#injected-embedded-channel-player-video > div > div.z-controls .group\\/volume .betterhover\\:group-hover\\/volume\\:flex {
-	display: flex;
-	align-items: center;
-}`;
-		}
-		const id = 'kp-volume-wheel-styles';
-		if (!document.getElementById(id)) {
-			const styleSheet = document.createElement("style");
-			styleSheet.id = id;
-			styleSheet.textContent = styles;
-			document.head.appendChild(styleSheet);
-		}
-	}
+#kp-volume-percentage { margin-left: 8px; font-size: 0.875rem; font-weight: 600; color: white; text-shadow: 0 1px 2px rgba(0,0,0,0.5); pointer-events: none; transition: opacity 0.2s ease; }
+.group\\/volume:hover #kp-volume-percentage { opacity: 1; }`;
+        if (CONFIG.SLIDER_ALWAYS_VISIBLE) {
+            styles += `
+#injected-embedded-channel-player-video > div > div.z-controls .group\\/volume .betterhover\\:group-hover\\/volume\\:flex { display: flex; align-items: center; }`;
+        }
+        const id = 'kp-volume-wheel-styles';
+        if (!document.getElementById(id)) {
+            const styleSheet = document.createElement("style");
+            styleSheet.id = id;
+            styleSheet.textContent = styles;
+            document.head.appendChild(styleSheet);
+        }
+    }
 
-	/* ------------------ AUTO 1080p ------------------ */
+    /* ------------------ AUTO 1080p ------------------ */
 
-	let qualityInterval = null;
-	const MAX_QUALITY_ATTEMPTS = 120; // ~6 seconds if interval is 50ms
+    let qualityInterval = null;
+    const MAX_QUALITY_ATTEMPTS = 40;
 
-	function findCogButton() {
-		// Aggressive selector from last attempt
-		const buttons = document.querySelectorAll('#injected-embedded-channel-player-video button');
-		for (const btn of buttons) {
-			const label = btn.ariaLabel || '';
-			if (label.toLowerCase().includes('settings') || btn.getAttribute('aria-haspopup') === 'menu') {
-				return btn;
-			}
-		}
-		return null;
-	}
+    function findCogButton() {
+        const buttons = document.querySelectorAll('#injected-embedded-channel-player-video button');
+        for (const btn of buttons) {
+            const label = btn.ariaLabel || '';
+            if (label.toLowerCase().includes('settings') || btn.getAttribute('aria-haspopup') === 'menu') {
+                return btn;
+            }
+        }
+        return null;
+    }
 
-	function selectQualityIfAvailable() {
-		const items = document.querySelectorAll('[role="menuitemradio"], [role="menuitem"]');
-		if (!items || items.length === 0) return false;
+    function selectQualityIfAvailable() {
+        const items = document.querySelectorAll('[role="menuitemradio"], [role="menuitem"]');
+        if (!items || items.length === 0) return false;
 
-		const list = Array.from(items);
-		for (const pref of CONFIG.QUALITY_PREFERENCES) {
-			const match = list.find(it => it.textContent && it.textContent.trim().includes(pref));
-			if (match) {
-				log(`Selecting Quality: ${pref}`);
-				simulateFullClick(match);
-				return true;
-			}
-		}
-		return false;
-	}
+        const list = Array.from(items);
+        for (const pref of CONFIG.QUALITY_PREFERENCES) {
+            const match = list.find(it => it.textContent && it.textContent.trim().includes(pref));
+            if (match) {
+                // If already checked, report success so we can close the menu
+                if (match.getAttribute('aria-checked') === 'true') {
+                    log(`Already on ${pref}, skipping click.`);
+                    return true;
+                }
+                log(`Selecting Quality: ${pref}`);
+                simulateFullClick(match);
+                return true;
+            }
+        }
+        return false;
+    }
 
-	function trySelectQualityLoop() {
-		clearQualityLoop();
-		let qualityAttempts = 0;
-		qualityInterval = setInterval(() => {
-			qualityAttempts++;
-			if (qualityAttempts > MAX_QUALITY_ATTEMPTS) {
-				log("Auto-Resolution failed to find settings button after max attempts.");
-				clearQualityLoop();
-				return;
-			}
+    function trySelectQualityLoop() {
+        clearQualityLoop();
+        let qualityAttempts = 0;
+        qualityInterval = setInterval(() => {
+            qualityAttempts++;
+            if (qualityAttempts > MAX_QUALITY_ATTEMPTS) {
+                clearQualityLoop();
+                return;
+            }
 
-			const cog = findCogButton();
-			if (cog) {
-				simulateFullClick(cog);
+            const cog = findCogButton();
+            if (cog) {
+                simulateFullClick(cog);
+                
+                // Wait slightly longer (150ms) to ensure the settings DOM is fully painted
+                setTimeout(() => {
+                    if (selectQualityIfAvailable()) {
+                        clearQualityLoop();
+                        // Click cog again to cleanly close the menu
+                        const closeCog = findCogButton();
+                        if (closeCog) simulateFullClick(closeCog);
+                    }
+                }, 150);
+            }
+        }, 500);
+    }
 
-				setTimeout(() => {
-					if (selectQualityIfAvailable()) {
-						clearQualityLoop();
-					} else {
-						// Click again to close the menu for safety
-						simulateFullClick(cog);
-					}
-				}, 50);
-			}
-		}, 250);
-	}
+    function clearQualityLoop() {
+        if (qualityInterval) {
+            clearInterval(qualityInterval);
+            qualityInterval = null;
+        }
+    }
 
-	function clearQualityLoop() {
-		if (qualityInterval) {
-			clearInterval(qualityInterval);
-			qualityInterval = null;
-		}
-	}
+    /* ------------------ AUTO THEATRE ------------------ */
 
-	/* ------------------ AUTO THEATRE (SINGLE 't' PRESS) ------------------ */
+    function singlePressTheater() {
+        const VIDEO_PLAYER_ID = 'video-player';
+        setTimeout(() => {
+            const videoElement = document.getElementById(VIDEO_PLAYER_ID);
+            if (!videoElement) return;
 
-	function singlePressTheater() {
-		const VIDEO_PLAYER_ID = 'video-player';
+            const isAlreadyTheater = Array.from(document.querySelectorAll('button')).some(
+                b => (b.ariaLabel && (b.ariaLabel.includes('Default View') || b.ariaLabel.includes('Default Mode')))
+            );
 
-		// Use a timeout to ensure the video player and key listener are active
-		setTimeout(() => {
-			const videoElement = document.getElementById(VIDEO_PLAYER_ID);
+            if (isAlreadyTheater) return;
 
-			// Critical check: Ensure the video player exists before attempting the press
-			if (!videoElement) {
-				log(`Video element (${VIDEO_PLAYER_ID}) not found for 't' press.`);
-				return;
-			}
+            const keyEvent = new KeyboardEvent('keydown', {
+                key: 't', code: 'KeyT', bubbles: true, cancelable: true
+            });
+            videoElement.dispatchEvent(keyEvent);
+            log("Theater toggled.");
+        }, 3000);
+    }
 
-			// Check if Theater is already active (by looking for the "Default View" button)
-			const isAlreadyTheater = Array.from(document.querySelectorAll('button')).some(
-				b => (b.ariaLabel && (b.ariaLabel.includes('Default View') || b.ariaLabel.includes('Default Mode')))
-			);
+    /* INITIAL RUN */
+    setTimeout(() => {
+        onNavigate(location.href);
+    }, 500);
 
-			if (isAlreadyTheater) {
-				log("Theater mode already active. Skipping 't' press.");
-				return;
-			}
-
-			// Dispatch a single 't' keypress on the video element
-			const keyEvent = new KeyboardEvent('keydown', {
-				key: 't',
-				code: 'KeyT',
-				bubbles: true,
-				cancelable: true
-			});
-			videoElement.dispatchEvent(keyEvent);
-			log("Dispatched single 't' keypress to toggle Theater Mode.");
-		}, 3000); // 3-second delay to ensure the player is fully initialized
-	}
-
-	/* ------------------ KICK OFF INITIAL RUN ------------------ */
-	setTimeout(() => {
-		onNavigate(location.href);
-	}, 500);
-
-	/* Cleanup on page unload */
-	window.addEventListener('beforeunload', () => {
-		clearQualityLoop();
-	});
+    window.addEventListener('beforeunload', () => {
+        clearQualityLoop();
+    });
 })();
