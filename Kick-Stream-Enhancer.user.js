@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kick Stream Enhancer (Volume Wheel + Auto-1080 + Auto-Theater)
 // @namespace    https://github.com/dxd7
-// @version      1.6
-// @description  FIXED: Locked menu search to the video player container only to prevent "Top Up" menu interference.
+// @version      1.7
+// @description  FIXED: Middle-click mute.
 // @match        https://kick.com/*
 // @grant        none
 // ==/UserScript==
@@ -78,6 +78,7 @@
 
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === 'visible') scheduleQualityCheck(); });
     window.addEventListener("focus", scheduleQualityCheck);
+    
     let resizeTimer;
     window.addEventListener('resize', () => {
         clearTimeout(resizeTimer);
@@ -97,7 +98,7 @@
     });
     navObserver.observe(document, { childList: true, subtree: true });
 
-    /* ------------------ VOLUME WHEEL ------------------ */
+    /* ------------------ VOLUME WHEEL & MUTE ------------------ */
 
     const playerSetupStore = new WeakSet();
     const bodyObserver = new MutationObserver(() => tryInitPlayer());
@@ -111,9 +112,23 @@
         setupVolumeWheel(video, videoDiv);
     }
 
+    function toggleMute(video, videoDiv) {
+        if (video.muted) {
+            video.muted = false;
+            const stored = parseFloat(videoDiv.getAttribute("kpvolume"));
+            if (!Number.isNaN(stored)) video.volume = stored;
+        } else {
+            videoDiv.setAttribute("kpvolume", video.volume);
+            video.muted = true;
+        }
+        updateSlider(video, videoDiv);
+    }
+
     function setupVolumeWheel(video, videoDiv) {
         if (videoDiv.hasAttribute("kpvolume-init")) return;
         videoDiv.setAttribute("kpvolume-init", "1");
+
+        // Scroll Wheel
         videoDiv.addEventListener("wheel", (e) => {
             e.preventDefault();
             if (video.muted) {
@@ -128,10 +143,20 @@
             updateSlider(video, videoDiv);
             setCookie("volume", video.volume, 365);
         }, { passive: false });
+
+        // RESTORED: Middle Click Mute
+        videoDiv.addEventListener("mousedown", (e) => {
+            if (e.button === 1) { // Middle click
+                e.preventDefault(); // Stop auto-scroll icon
+                toggleMute(video, videoDiv);
+            }
+        });
+
         videoDiv.addEventListener("mousemove", () => {
             bindMuteBtn(video, videoDiv);
             updateSlider(video, videoDiv);
         });
+
         applySliderCSS();
     }
 
@@ -144,6 +169,7 @@
             if (sliderFill) sliderFill.style.right = `${100 - vol}%`;
             const sliderP = controls.querySelector('.group\\/volume .betterhover\\:group-hover\\/volume\\:flex');
             if (sliderP) sliderP.setAttribute("playervolume", vol + "%");
+            
             let pDisp = document.getElementById('kp-volume-percentage');
             if (!pDisp) {
                 pDisp = document.createElement('span');
@@ -152,7 +178,7 @@
                 const volCont = document.querySelector('.group\\/volume');
                 if (volCont) volCont.appendChild(pDisp);
             }
-            if (pDisp) pDisp.textContent = `${vol}%`;
+            if (pDisp) pDisp.textContent = video.muted ? "MUTED" : `${vol}%`;
         } catch (err) {}
     }
 
@@ -160,9 +186,9 @@
         const btn = document.querySelector('#injected-embedded-channel-player-video .z-controls .group\\/volume > button');
         if (!btn || btn._kpbound) return;
         btn._kpbound = true;
-        btn.addEventListener("click", () => {
-            if (!video.muted) videoDiv.setAttribute("kpvolume", video.volume);
-            video.muted = !video.muted;
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            toggleMute(video, videoDiv);
         });
     }
 
@@ -188,7 +214,6 @@
             if (attempts++ > 10) { clearInterval(qualityInterval); qualityInterval = null; return; }
             if (attempts % 3 === 0) wakeUpPlayer();
 
-            // FIX: Only look for the button inside the player container
             const player = document.querySelector('#injected-embedded-channel-player-video');
             if (!player) return;
 
