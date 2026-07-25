@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kick Stream Enhancer (Volume Wheel + Auto-1080 + Auto-Theater)
 // @namespace    https://github.com/dxd7
-// @version      1.8
-// @description  Fixed: Quality now retries until 1080p is active.
+// @version      1.9
+// @description  FIXED: Theater uses size change detection – no more on/off flipping.
 // @match        https://kick.com/*
 // @grant        none
 // ==/UserScript==
@@ -12,11 +12,11 @@
 
     const CONFIG = {
         VOLUME_STEP: 5,
-        SHOW_CONTROLS_ON_SCROLL: true,
-        SLIDER_ALWAYS_VISIBLE: true,
-        HIDE_CURSOR_DELAY: 4000,
         QUALITY_PREFERENCES: ['1080p60', '1080p', '720p60', '720p'],
-        RECHECK_DELAY: 2000
+        RECHECK_DELAY: 2000,
+        THEATER_RETRY_DELAY: 3000,   // wait between attempts
+        THEATER_MAX_ATTEMPTS: 5,
+        THEATER_SIZE_THRESHOLD: 150  // px difference to confirm change
     };
 
     function log(msg) { console.log(`[KickQoL] ${msg}`); }
@@ -61,7 +61,6 @@
         if (!isStreamPage(location.href) || location.href.includes("/clips")) return;
         const video = document.getElementById("video-player");
         if (!video) {
-            // Video element not yet present – schedule a retry
             scheduleQualityCheck();
             return;
         }
@@ -72,7 +71,6 @@
         log(`Quality drop detected (${video.videoHeight}p). Fixing...`);
         wakeUpPlayer();
         trySelectQualityLoop();
-        // Keep retrying until quality is correct
         scheduleQualityCheck();
     }
 
@@ -101,8 +99,7 @@
             lastUrl = location.href;
             tryInitPlayer();
             if (isStreamPage(lastUrl)) {
-                // On new stream, launch both theater and quality enforcement
-                singlePressTheater();
+                startTheaterAuto();
                 scheduleQualityCheck();
             }
         }
@@ -139,7 +136,6 @@
         if (videoDiv.hasAttribute("kpvolume-init")) return;
         videoDiv.setAttribute("kpvolume-init", "1");
 
-        // Scroll Wheel
         videoDiv.addEventListener("wheel", (e) => {
             e.preventDefault();
             if (video.muted) {
@@ -155,7 +151,6 @@
             setCookie("volume", video.volume, 365);
         }, { passive: false });
 
-        // Middle Click Mute
         videoDiv.addEventListener("mousedown", (e) => {
             if (e.button === 1) {
                 e.preventDefault();
@@ -255,37 +250,76 @@
         }, 1000);
     }
 
-    /* ------------------ THEATER (RELIABLE) ------------------ */
+    /* ------------------ THEATER (SELF‑CORRECTING TOGGLE) ------------------ */
 
-    function singlePressTheater() {
-        setTimeout(() => {
-            // Already in theater mode?
-            const isTheater = Array.from(document.querySelectorAll('button')).some(
-                b => b.ariaLabel?.includes('Default View')
-            );
-            if (isTheater) return;
+    let theaterAttempts = 0;
+    let theaterTimeout;
 
-            // 1) Click the theater button directly
-            const theaterBtn = document.querySelector('button[aria-label*="Theater" i]');
-            if (theaterBtn) {
-                simulateFullClick(theaterBtn);
-                return;
-            }
+    function startTheaterAuto() {
+        clearTimeout(theaterTimeout);
+        theaterAttempts = 0;
+        doTheaterToggle();
+    }
 
-            // 2) Fallback: send the 't' shortcut to the document
+    function doTheaterToggle() {
+        if (theaterAttempts >= CONFIG.THEATER_MAX_ATTEMPTS) {
+            log("Theater toggle attempts exhausted.");
+            return;
+        }
+
+        const video = document.getElementById("video-player");
+        if (!video) {
+            // Video not ready yet – wait and retry
+            theaterTimeout = setTimeout(doTheaterToggle, CONFIG.THEATER_RETRY_DELAY);
+            return;
+        }
+
+        // Measure video width before toggle
+        const widthBefore = video.clientWidth;
+
+        const theaterBtn = document.querySelector('button[aria-label*="Theater" i]');
+        if (theaterBtn) {
+            simulateFullClick(theaterBtn);
+        } else {
             document.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 't',
-                code: 'KeyT',
-                bubbles: true,
-                cancelable: true
+                key: 't', code: 'KeyT', bubbles: true, cancelable: true
             }));
-        }, 3500);
+        }
+
+        // Wait for transition, then measure again
+        setTimeout(() => {
+            const widthAfter = video.clientWidth;
+            const diff = widthAfter - widthBefore;
+
+            if (diff > CONFIG.THEATER_SIZE_THRESHOLD) {
+                // Video got bigger → theater turned ON
+                log("Theater mode activated (size increased).");
+                return;
+            } else if (diff < -CONFIG.THEATER_SIZE_THRESHOLD) {
+                // Video got smaller → we accidentally turned it OFF (it was already on)
+                log("Theater was already on; toggling again to restore.");
+                // Toggle once more to turn it back ON
+                if (theaterBtn) {
+                    simulateFullClick(theaterBtn);
+                } else {
+                    document.dispatchEvent(new KeyboardEvent('keydown', {
+                        key: 't', code: 'KeyT', bubbles: true, cancelable: true
+                    }));
+                }
+                return;
+            } else {
+                // No significant change – maybe the button didn't work, retry
+                theaterAttempts++;
+                log(`No size change detected (attempt ${theaterAttempts}), retrying...`);
+                theaterTimeout = setTimeout(doTheaterToggle, CONFIG.THEATER_RETRY_DELAY);
+            }
+        }, 800);
     }
 
     // Kick‑off on initial page load
     setTimeout(() => {
         if (isStreamPage(location.href)) {
-            singlePressTheater();
+            startTheaterAuto();
             scheduleQualityCheck();
         }
     }, 500);
