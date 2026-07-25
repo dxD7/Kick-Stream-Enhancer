@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kick Stream Enhancer (Volume Wheel + Auto-1080 + Auto-Theater)
 // @namespace    https://github.com/dxd7
-// @version      1.7
-// @description  FIXED: Middle-click mute.
+// @version      1.8
+// @description  Fixed: Quality now retries until 1080p is active.
 // @match        https://kick.com/*
 // @grant        none
 // ==/UserScript==
@@ -16,7 +16,7 @@
         SLIDER_ALWAYS_VISIBLE: true,
         HIDE_CURSOR_DELAY: 4000,
         QUALITY_PREFERENCES: ['1080p60', '1080p', '720p60', '720p'],
-        RECHECK_DELAY: 2000 
+        RECHECK_DELAY: 2000
     };
 
     function log(msg) { console.log(`[KickQoL] ${msg}`); }
@@ -60,14 +60,20 @@
     function checkAndEnforceQuality() {
         if (!isStreamPage(location.href) || location.href.includes("/clips")) return;
         const video = document.getElementById("video-player");
-        if (!video) return;
+        if (!video) {
+            // Video element not yet present – schedule a retry
+            scheduleQualityCheck();
+            return;
+        }
         if (video.videoHeight >= 1060) {
             log(`Quality is already ${video.videoHeight}p.`);
             return;
         }
         log(`Quality drop detected (${video.videoHeight}p). Fixing...`);
         wakeUpPlayer();
-        setTimeout(trySelectQualityLoop, 100);
+        trySelectQualityLoop();
+        // Keep retrying until quality is correct
+        scheduleQualityCheck();
     }
 
     let scheduleTimeout;
@@ -76,9 +82,11 @@
         scheduleTimeout = setTimeout(checkAndEnforceQuality, CONFIG.RECHECK_DELAY);
     }
 
-    document.addEventListener("visibilitychange", () => { if (document.visibilityState === 'visible') scheduleQualityCheck(); });
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === 'visible') scheduleQualityCheck();
+    });
     window.addEventListener("focus", scheduleQualityCheck);
-    
+
     let resizeTimer;
     window.addEventListener('resize', () => {
         clearTimeout(resizeTimer);
@@ -92,8 +100,11 @@
         if (location.href !== lastUrl) {
             lastUrl = location.href;
             tryInitPlayer();
-            setTimeout(checkAndEnforceQuality, 1500);
-            if (isStreamPage(lastUrl)) singlePressTheater();
+            if (isStreamPage(lastUrl)) {
+                // On new stream, launch both theater and quality enforcement
+                singlePressTheater();
+                scheduleQualityCheck();
+            }
         }
     });
     navObserver.observe(document, { childList: true, subtree: true });
@@ -144,10 +155,10 @@
             setCookie("volume", video.volume, 365);
         }, { passive: false });
 
-        // RESTORED: Middle Click Mute
+        // Middle Click Mute
         videoDiv.addEventListener("mousedown", (e) => {
-            if (e.button === 1) { // Middle click
-                e.preventDefault(); // Stop auto-scroll icon
+            if (e.button === 1) {
+                e.preventDefault();
                 toggleMute(video, videoDiv);
             }
         });
@@ -169,7 +180,7 @@
             if (sliderFill) sliderFill.style.right = `${100 - vol}%`;
             const sliderP = controls.querySelector('.group\\/volume .betterhover\\:group-hover\\/volume\\:flex');
             if (sliderP) sliderP.setAttribute("playervolume", vol + "%");
-            
+
             let pDisp = document.getElementById('kp-volume-percentage');
             if (!pDisp) {
                 pDisp = document.createElement('span');
@@ -211,14 +222,18 @@
         if (qualityInterval) return;
         let attempts = 0;
         qualityInterval = setInterval(() => {
-            if (attempts++ > 10) { clearInterval(qualityInterval); qualityInterval = null; return; }
+            if (attempts++ > 10) {
+                clearInterval(qualityInterval);
+                qualityInterval = null;
+                return;
+            }
             if (attempts % 3 === 0) wakeUpPlayer();
 
             const player = document.querySelector('#injected-embedded-channel-player-video');
             if (!player) return;
 
-            const cog = Array.from(player.querySelectorAll('button')).find(b => 
-                b.ariaLabel?.toLowerCase().includes('settings') || 
+            const cog = Array.from(player.querySelectorAll('button')).find(b =>
+                b.ariaLabel?.toLowerCase().includes('settings') ||
                 b.getAttribute('aria-haspopup') === 'menu'
             );
 
@@ -231,22 +246,47 @@
                         if (match.getAttribute('aria-checked') !== 'true') simulateFullClick(match);
                         clearInterval(qualityInterval);
                         qualityInterval = null;
-                        setTimeout(() => { if (document.querySelector('[role="menu"]')) simulateFullClick(cog); }, 200);
+                        setTimeout(() => {
+                            if (document.querySelector('[role="menu"]')) simulateFullClick(cog);
+                        }, 200);
                     }
                 }, 200);
             }
         }, 1000);
     }
 
-    /* ------------------ THEATER ------------------ */
+    /* ------------------ THEATER (RELIABLE) ------------------ */
 
     function singlePressTheater() {
         setTimeout(() => {
-            const video = document.getElementById('video-player');
-            const isTheater = Array.from(document.querySelectorAll('button')).some(b => b.ariaLabel?.includes('Default View'));
-            if (video && !isTheater) video.dispatchEvent(new KeyboardEvent('keydown', { key: 't', code: 'KeyT', bubbles: true }));
+            // Already in theater mode?
+            const isTheater = Array.from(document.querySelectorAll('button')).some(
+                b => b.ariaLabel?.includes('Default View')
+            );
+            if (isTheater) return;
+
+            // 1) Click the theater button directly
+            const theaterBtn = document.querySelector('button[aria-label*="Theater" i]');
+            if (theaterBtn) {
+                simulateFullClick(theaterBtn);
+                return;
+            }
+
+            // 2) Fallback: send the 't' shortcut to the document
+            document.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 't',
+                code: 'KeyT',
+                bubbles: true,
+                cancelable: true
+            }));
         }, 3500);
     }
 
-    setTimeout(() => onNavigate(location.href), 500);
+    // Kick‑off on initial page load
+    setTimeout(() => {
+        if (isStreamPage(location.href)) {
+            singlePressTheater();
+            scheduleQualityCheck();
+        }
+    }, 500);
 })();
