@@ -1,12 +1,14 @@
 // ==UserScript==
-// @name         Kick Stream Enhancer (rewrite)
-// @namespace    https://github.com/dxD7/Kick-Stream-Enhancer
-// @version      2.0.0
-// @description  Mouse wheel volume + middle-click mute, auto highest quality, auto theater mode for Kick.com
+// @name         Kick Stream Enhancer (Volume Wheel + Auto-1080 + Auto-Theater)
+// @namespace    https://github.com/dxd7
+// @version      2.0.1
+// @description  Mouse wheel volume with % readout, middle-click mute, auto highest quality, auto theater mode for Kick.com
 // @match        https://kick.com/*
 // @match        https://www.kick.com/*
 // @run-at       document-idle
 // @grant        none
+// @updateURL    https://github.com/dxD7/Kick-Stream-Enhancer/raw/refs/heads/main/Kick-Stream-Enhancer.user.js
+// @downloadURL  https://github.com/dxD7/Kick-Stream-Enhancer/raw/refs/heads/main/Kick-Stream-Enhancer.user.js
 // ==/UserScript==
 
 (() => {
@@ -138,7 +140,12 @@
    * ------------------------------------------------------------------ */
   let osd, osdTimer;
   function showOSD(video, text) {
-    if (flashIndicator()) return; // preferred: indicator next to the speaker icon
+    ensureIndicator();                // bar may have just re-rendered after being idle
+    if (flashIndicator()) return;     // preferred: indicator next to the speaker icon
+    if (volEverAttached) {            // bar is momentarily collapsed: retry shortly instead of showing the box
+      for (const ms of [120, 350]) setTimeout(() => { ensureIndicator(); flashIndicator(); }, ms);
+      return;
+    }
     if (!osd) {
       osd = document.createElement('div');
       osd.id = 'kse-osd';
@@ -168,6 +175,7 @@
   let volEl = null;
   let volBoundVideo = null;
   let volMissLogged = false;
+  let volEverAttached = false; // once the bar readout has worked, never fall back to the floating box
   let savedVol = null;   // last audible volume, restored on unmute (Kick's own value goes stale)
   let volTouchedAt = 0;  // last time the wheel changed volume
   const fmtVol = (v) => (v.muted || v.volume === 0 ? 'Muted' : Math.round(v.volume * 100) + '%');
@@ -332,6 +340,7 @@
       });
     }
     btn.insertAdjacentElement('afterend', volEl);
+    volEverAttached = true;
     updateIndicator();
   }
 
